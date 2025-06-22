@@ -12,3 +12,4 @@ wheels/
 # Secrets file
 .env
 env
+/fitness-tracker.db
