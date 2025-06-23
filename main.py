@@ -3,6 +3,7 @@ import logging
 import datetime
 from enum import IntEnum
 import aiosqlite
+import typing
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,6 +13,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from pydantic import BaseModel
+from google import genai
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,11 +31,24 @@ class BotTokenUnavailableException(Exception):
     """Exception thrown when telegram bot token is not available."""
 
 
+class GeminiAPIKeyUnavailableException(Exception):
+    """Exception thrown when google gemini api token is not available."""
+
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise BotTokenUnavailableException(
         "TELEGRAM_BOT_TOKEN environment variable is not set"
     )
+
+GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise GeminiAPIKeyUnavailableException(
+        "GOOGLE_GEMINI_API_KEY environment variable is not set"
+    )
+
+gemini = genai.Client(api_key=GEMINI_API_KEY)
+
 
 db: aiosqlite.Connection | None = None
 
@@ -61,11 +77,33 @@ async def db_init(*args) -> None:
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  timestamp TEXT NOT NULL,
                  description TEXT NOT NULL,
-                 calories INTEGER,
                  nutrient_breakdown TEXT
             );"""
     )
     await db.commit()
+
+
+class MacroNutrient(BaseModel):
+    name: typing.Literal["protein", "fat", "carbohydrate"]
+    content_in_grams: int
+
+
+class MealNutrition(BaseModel):
+    calories: int
+    macro_nutrients: list[MacroNutrient]
+
+
+async def macro_nutrient_breakdown(meal_description: str) -> str:
+    """Get macro nutrient breakdown for given meal as a JSON string."""
+    response = await gemini.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=f"Give the total calories (in KCal) and a macro nutrient breakdown (in grams) of the following meal description.\n{meal_description}",
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": MealNutrition,
+        },
+    )
+    return response.text
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,6 +139,13 @@ async def description(
     )[0]
     await db.commit()
     await update.message.reply_text(f"Meal has been recorded. Meal id is {meal_id}.")
+    nutrition_info_json = await macro_nutrient_breakdown(description)
+    if nutrition_info_json:
+        await db.execute(
+            "UPDATE meals SET nutrient_breakdown=? WHERE id=?",
+            (nutrition_info_json, meal_id),
+        )
+        await db.commit()
     return ConversationHandler.END
 
 
