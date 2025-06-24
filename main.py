@@ -83,27 +83,28 @@ async def db_init(*args) -> None:
     await db.commit()
 
 
-class MacroNutrient(BaseModel):
-    name: typing.Literal["protein", "fat", "carbohydrate"]
-    content_in_grams: int
-
-
-class MealNutrition(BaseModel):
+class MacroNutrients(BaseModel):
     calories: int
-    macro_nutrients: list[MacroNutrient]
+    protein: int
+    fat: int
+    carbohydrate: int
 
 
-async def macro_nutrient_breakdown(meal_description: str) -> str:
+async def macro_nutrient_breakdown(meal_description: str) -> str | None:
     """Get macro nutrient breakdown for given meal as a JSON string."""
-    response = await gemini.aio.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=f"Give the total calories (in KCal) and a macro nutrient breakdown (in grams) of the following meal description.\n{meal_description}",
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": MealNutrition,
-        },
-    )
-    return response.text
+
+    try:
+        response = await gemini.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Give the total calories (in KCal) and a macro nutrient breakdown (in grams) of the following meal description.\n{meal_description}",
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": MacroNutrients,
+            },
+        )
+        return response.text
+    except Exception:
+        return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
