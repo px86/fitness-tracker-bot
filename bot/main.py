@@ -5,6 +5,7 @@ from enum import IntEnum
 import aiosqlite
 import typing
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -16,6 +17,9 @@ from telegram.ext import (
 from pydantic import BaseModel
 from google import genai
 from dotenv import load_dotenv
+import bot.db as db
+from bot.handlers.userinfo import userinfohandler
+from bot.db.db import getuser
 
 load_dotenv()
 
@@ -50,39 +54,6 @@ if not GEMINI_API_KEY:
 gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 
-db: aiosqlite.Connection | None = None
-
-
-async def db_connect(*args) -> aiosqlite.Connection:
-    """Return database connection."""
-    global db
-    if db is None:
-        db = await aiosqlite.connect("fitness-tracker.db")
-    return db
-
-
-async def db_disconnect(*args) -> None:
-    """Close the database connection"""
-    global db
-    if db is not None:
-        await db.close()
-        db = None
-
-
-async def db_init(*args) -> None:
-    """Create database table if does not exist already."""
-    db = await db_connect()
-    await db.execute(
-        """CREATE TABLE IF NOT EXISTS meals(
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 timestamp TEXT NOT NULL,
-                 description TEXT NOT NULL,
-                 nutrient_breakdown TEXT
-            );"""
-    )
-    await db.commit()
-
-
 class MacroNutrients(BaseModel):
     calories: int
     protein: int
@@ -108,11 +79,32 @@ async def macro_nutrient_breakdown(meal_description: str) -> str | None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        """Hi there! I am here to help you track your fitness. Please select one of the following commands.
-        /CaptureMeal - record a meal
-        """,
-    )
+    userid = update.message.from_user.id
+    user = await getuser(userid)
+    if user is not None:
+        await update.message.reply_text(
+            "\n".join(
+                [
+                    f"Hi <b>{user.name}</b>, I'm glad to see you again. How may I help you?",
+                    "",
+                    "/CaptureMeal     record a meal",
+                    "/RecordUserInfo  update your information by re-recording them",
+                ]
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    else:
+        await update.message.reply_text(
+            "\n".join(
+                [
+                    "Hi there! you are new here.",
+                    "I am here to help you in your fitness journey.",
+                    "Let's start by recording some of your basic information like age, height, weight etc.",
+                    "Please send /RecordUserInfo to get started.",
+                ]
+            )
+        )
 
 
 class MealConversationState(IntEnum):
@@ -129,24 +121,24 @@ async def capture_meal(
 async def description(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> MealConversationState | ConversationHandler:
-    db = await db_connect()
+    conn = await db.connect()
     description = update.message.text
     timestamp = datetime.datetime.now().isoformat()
     meal_id = (
-        await db.execute_insert(
+        await conn.execute_insert(
             "INSERT INTO meals(description, timestamp) VALUES(?, ?)",
             (description, timestamp),
         )
     )[0]
-    await db.commit()
+    await conn.commit()
     await update.message.reply_text(f"Meal has been recorded. Meal id is {meal_id}.")
     nutrition_info_json = await macro_nutrient_breakdown(description)
     if nutrition_info_json:
-        await db.execute(
+        await conn.execute(
             "UPDATE meals SET nutrient_breakdown=? WHERE id=?",
             (nutrition_info_json, meal_id),
         )
-        await db.commit()
+        await conn.commit()
     return ConversationHandler.END
 
 
@@ -161,9 +153,9 @@ def main():
     application = (
         ApplicationBuilder()
         .token(TOKEN)
-        .post_init(db_connect)
-        .post_init(db_init)
-        .post_shutdown(db_disconnect)
+        .post_init(db.connect)
+        .post_init(db.init)
+        .post_shutdown(db.disconnect)
         .build()
     )
 
@@ -180,6 +172,8 @@ def main():
     )
 
     application.add_handler(conv_handler)
+
+    application.add_handler(userinfohandler)
 
     application.run_polling()
 
